@@ -26,7 +26,7 @@
 #include <cmath>
 #include <regex>
 
-MemoryMetric::MemoryMetric(Platform platform, std::shared_ptr<JsonReportGenerator> reportGenerator)
+MemoryMetric::MemoryMetric(Platform platform, bool enableZram, std::shared_ptr<JsonReportGenerator> reportGenerator)
         : mQuit(false),
           mCv(),
           mLinuxMemoryMeasurements{},
@@ -36,6 +36,7 @@ MemoryMetric::MemoryMetric(Platform platform, std::shared_ptr<JsonReportGenerato
           mMemoryBandwidthSupported(false),
           mMemoryFragmentation{},
           mPlatform(platform),
+          mZramSupported(enableZram),
           mReportGenerator(std::move(reportGenerator))
 {
 
@@ -187,6 +188,10 @@ void MemoryMetric::CollectData(std::chrono::seconds frequency)
             GetBroadcomBmemUsage();
         }
 
+        if (mZramSupported) {
+            GetZramMetrics();
+        }
+
         auto end = std::chrono::high_resolution_clock::now();
         LOG_INFO("MemoryMetric completed in %lld ms",
                  (long long) std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
@@ -330,6 +335,18 @@ void MemoryMetric::SaveResults()
             bmemSum += m.second.GetAverage();
         });
         mReportGenerator->addToAccumulatedMemoryUsage(bmemSum);
+        data.clear();
+    }
+
+    if (mZramSupported) {
+        for (const auto &result : mZramMeasurements) {
+            data.emplace_back(JsonReportGenerator::dataItems{
+                std::make_pair("Name", result.first), result.second.uncompressedSize, result.second.compressedSize,
+                result.second.sysMemUsed, result.second.migrated, result.second.totalFragmentation,
+                result.second.zeroPages, result.second.concurrentCompressOps});
+        }
+        mReportGenerator->addDataset("zram", data);
+        data.clear();
     }
 }
 
@@ -866,6 +883,110 @@ void MemoryMetric::GetGpuMemoryUsageRealtek()
             }
         }
     }
+}
+
+static long double ConvertToNumericValue(const std::string &value) {
+    if (value.empty()) {
+        return 0;
+    }
+
+    char unit = value.back();
+    long double numericValue = 0;
+    try {
+        numericValue = std::stold(value.substr(0, value.size() - 1));
+    } catch (const std::invalid_argument &e) {
+        LOG_WARN("Invalid numeric value: %s", value.c_str());
+        return 0;
+    } catch (const std::out_of_range &e) {
+        LOG_WARN("Numeric value out of range: %s", value.c_str());
+        return 0;
+    }
+
+    switch (unit) {
+    case 'M':
+        return numericValue;
+    case 'K':
+        return numericValue / 1024.0;
+    case 'B':
+        return numericValue / 1024.0 / 1024.0;
+    default:
+        LOG_WARN("Unexpected unit in value: %c", unit);
+        return numericValue;
+    }
+}
+
+void MemoryMetric::GetZramMetrics() {
+    std::string name;
+    long double uncompressedSize_val, compressedSize_val, sysMemUsed_val, migrated_val, totalFragmentation_val,
+        zeroPages_val, concurrentCompressOps_val;
+
+    std::string command = "zramctl --output-all";
+    std::string line;
+    char buffer[1024];
+    FILE *stream = popen(command.c_str(), "r");
+
+    if (!stream) {
+        LOG_SYS_ERROR(errno, "Failed to run zramctl command");
+        return;
+    }
+
+    bool firstLine = true;
+    while (fgets(buffer, sizeof(buffer), stream) != NULL) {
+        line = buffer;
+        if (firstLine) { // Skip header line
+            firstLine = false;
+            continue;
+        }
+
+        std::istringstream iss(line);
+        std::vector<std::string> tokens{std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>()};
+
+        name = tokens[0];
+        uncompressedSize_val = ConvertToNumericValue(tokens[2]);   // DATA
+        compressedSize_val = ConvertToNumericValue(tokens[3]);     // COMPR
+        concurrentCompressOps_val = std::stold(tokens[5]);         // STREAMS
+        zeroPages_val = std::stold(tokens[6]);                     // ZERO-PAGES
+        totalFragmentation_val = ConvertToNumericValue(tokens[7]); // TOTAL
+        sysMemUsed_val = ConvertToNumericValue(tokens[9]);         // MEM-USED
+        migrated_val = ConvertToNumericValue(tokens[10]);          // MIGRATED
+
+        auto itr = mZramMeasurements.find(name);
+        if (itr != mZramMeasurements.end()) {
+            itr->second.uncompressedSize.AddDataPoint(uncompressedSize_val);
+            itr->second.compressedSize.AddDataPoint(compressedSize_val);
+            itr->second.sysMemUsed.AddDataPoint(sysMemUsed_val);
+            itr->second.migrated.AddDataPoint(migrated_val);
+            itr->second.totalFragmentation.AddDataPoint(totalFragmentation_val);
+            itr->second.zeroPages.AddDataPoint(zeroPages_val);
+            itr->second.concurrentCompressOps.AddDataPoint(concurrentCompressOps_val);
+        } else {
+            Measurement uncompressedSize("Data_Used_MB");
+            uncompressedSize.AddDataPoint(uncompressedSize_val);
+
+            Measurement compressedSize("Compressed_Data_MB");
+            compressedSize.AddDataPoint(compressedSize_val);
+
+            Measurement sysMemUsed("Total_Memory_MB");
+            sysMemUsed.AddDataPoint(sysMemUsed_val);
+
+            Measurement migrated("Objects_Migrated");
+            migrated.AddDataPoint(migrated_val);
+
+            Measurement totalFragmentation("Total_Fragmentation_MB");
+            totalFragmentation.AddDataPoint(totalFragmentation_val);
+
+            Measurement zeroPages("Zero_Pages");
+            zeroPages.AddDataPoint(zeroPages_val);
+
+            Measurement concurrentCompressOps("Concurrent_Compress_Ops");
+            concurrentCompressOps.AddDataPoint(concurrentCompressOps_val);
+
+            mZramMeasurements.insert(
+                std::make_pair(name, zramMeasurement(uncompressedSize, compressedSize, sysMemUsed, migrated,
+                                                     totalFragmentation, zeroPages, concurrentCompressOps)));
+        }
+    }
+    pclose(stream);
 }
 
 /**

@@ -35,7 +35,7 @@
 class MemoryMetric : public IMetric
 {
 public:
-    MemoryMetric(Platform platform, std::shared_ptr<JsonReportGenerator> reportGenerator);
+    MemoryMetric(Platform platform, bool enableZram, std::shared_ptr<JsonReportGenerator> reportGenerator);
 
     ~MemoryMetric() override;
 
@@ -68,6 +68,8 @@ private:
     void GetGpuMemoryUsageAmlogic();
 
     void GetGpuMemoryUsageRealtek();
+
+    void GetZramMetrics();
 
     pid_t tidToParentPid(pid_t tid);
 
@@ -114,6 +116,24 @@ private:
         Measurement Used;
     };
 
+    struct zramMeasurement {
+        zramMeasurement(Measurement &_uncompressedSize, Measurement &_compressedSize, Measurement &_sysMemUsed,
+                        Measurement &_migrated, Measurement &_totalFragmentation, Measurement &_zeroPages,
+                        Measurement &_concurrentCompressOps)
+            : uncompressedSize(std::move(_uncompressedSize)), compressedSize(std::move(_compressedSize)),
+              sysMemUsed(std::move(_sysMemUsed)), migrated(std::move(_migrated)),
+              totalFragmentation(std::move(_totalFragmentation)), zeroPages(std::move(_zeroPages)),
+              concurrentCompressOps(std::move(_concurrentCompressOps)) {}
+
+        Measurement uncompressedSize;
+        Measurement compressedSize;
+        Measurement sysMemUsed;         // Actual system memory in use
+        Measurement migrated;           // No. of objects migrated by compaction
+        Measurement totalFragmentation; // Total fragmentation + meta overhead
+        Measurement zeroPages;          // Empty pages with no allocated memory
+        Measurement concurrentCompressOps;
+    };
+
     std::thread mCollectionThread;
     bool mQuit;
     std::condition_variable mCv;
@@ -125,7 +145,7 @@ private:
     std::map<std::string, Measurement> mLinuxMemoryMeasurements;
     std::map<pid_t, gpuMeasurement> mGpuMeasurements;
     std::map<std::string, Measurement> mContainerMeasurements;
-
+    std::map<std::string, zramMeasurement> mZramMeasurements;
     std::map<std::string, Measurement> mBroadcomBmemMeasurements;
 
     Measurement mCmaFree;
@@ -134,6 +154,7 @@ private:
 
     bool mMemoryBandwidthSupported;
     bool mGPUMemorySupported;
+    bool mZramSupported;
 
     // Position in vector reflects order
     std::map<std::string, std::vector<memoryFragmentation>> mMemoryFragmentation;

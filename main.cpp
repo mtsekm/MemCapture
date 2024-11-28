@@ -59,6 +59,7 @@ static std::filesystem::path gOutputDirectory = std::filesystem::current_path() 
 
 static bool gJson = false;
 static bool gCpuIdle = false;
+static bool gEnableZram = false;
 
 bool gEnableGroups = false;
 static std::filesystem::path gGroupsFile;
@@ -78,6 +79,7 @@ static void displayUsage()
     printf("    -p, --platform      Platform we're running on. Supported options = ['AMLOGIC', 'AMLOGIC_950D4', 'REALTEK', 'REALTEK64', 'BROADCOM']. Defaults to Amlogic\n");
     printf("    -g, --groups        Path to JSON file containing the group mappings (optional)\n");
     printf("    -c, --cpuidle       Enable CPU Idle metrics (default to false, requires kernel support)\n");
+    printf("    -z, --zram          Enable tracking zram stats (optional)\n");
 }
 
 static void parseArgs(const int argc, char **argv)
@@ -90,6 +92,7 @@ static void parseArgs(const int argc, char **argv)
             {"json",       no_argument,       nullptr, (int) 'j'},
             {"groups",     required_argument, nullptr, (int) 'g'},
             {"cpuidle",     no_argument, nullptr, (int) 'c'},
+            {"zram",       no_argument,       nullptr, (int) 'z'},
             {nullptr, 0,                      nullptr, 0}
     };
 
@@ -98,7 +101,7 @@ static void parseArgs(const int argc, char **argv)
     int option;
     int longindex;
 
-    while ((option = getopt_long(argc, argv, "hd:p:o:jg:c", longopts, &longindex)) != -1) {
+    while ((option = getopt_long(argc, argv, "hd:p:o:jg:cz", longopts, &longindex)) != -1) {
         switch (option) {
             case 'h':
                 displayUsage();
@@ -145,6 +148,10 @@ static void parseArgs(const int argc, char **argv)
             }
             case 'c': {
                 gCpuIdle = true;
+                break;
+            }
+            case 'z': {
+                gEnableZram = true;
                 break;
             }
             case '?':
@@ -231,7 +238,7 @@ int main(int argc, char *argv[])
 
     // Create all our metrics
     ProcessMetric processMetric(reportGenerator);
-    MemoryMetric memoryMetric(gPlatform, reportGenerator);
+    MemoryMetric memoryMetric(gPlatform, gEnableZram, reportGenerator);
 
 #ifdef ENABLE_CPU_IDLE_METRICS
     CpuIdleMetric cpuIdleMetric(reportGenerator);
